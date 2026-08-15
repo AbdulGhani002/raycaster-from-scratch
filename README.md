@@ -1,12 +1,21 @@
-# Raycaster from scratch (pure C)
+# Gold Hunter — a raycaster game from scratch (pure C)
 
-A Wolfenstein 3D–style software raycaster written from scratch in a single C
-file. No engine, no third-party libraries, no asset files — the only external
-calls are to the OS itself (`user32`/`gdi32`) to open a window and copy a
-finished framebuffer to the screen. Everything you see is computed by hand,
-every frame, on the CPU.
+A Wolfenstein 3D–style software raycaster **and a playable game** written
+from scratch in a single C file. No engine, no third-party libraries, no
+asset files — the only external calls are to the OS itself
+(`user32`/`gdi32`) to open a window and copy a finished framebuffer to the
+screen. Everything you see is computed by hand, every frame, on the CPU.
 
 ![screenshot](screenshot.png)
+
+## The game
+
+Ten gold stashes are hidden around the dungeon — in pillar alcoves, room
+corners, and one right behind your spawn point. Walk over gold to grab it.
+The timer stops when you find the last one; press `R` and race your own
+best time. The gold is rendered as bobbing billboard sprites that clip
+correctly behind walls via a per-column depth buffer, and the HUD uses a
+hand-encoded 5×7 bitmap font.
 
 ## Everything is hand-made
 
@@ -20,6 +29,9 @@ every frame, on the CPU.
 | The world map, built from wall primitives | `gen_map()` |
 | Collision detection with wall sliding | `blocked()`, `update()` |
 | Raw-input mouse look with cursor capture | `wndproc()`, `capture_mouse()` |
+| Billboard sprites clipped by a depth buffer | `render_frame()`, `zbuf` |
+| 5×7 bitmap font, encoded glyph by glyph | `font5x7[]`, `draw_text()` |
+| Game state: pickups, timer, win screen | `update()`, `restart_game()` |
 | Minimap overlay with alpha blending | `render_frame()` |
 | High-resolution frame timing | `now_seconds()` |
 | BMP screenshot encoder, byte by byte | `save_bmp()` |
@@ -32,6 +44,7 @@ every frame, on the CPU.
 | `W` / `S` | move forward / back |
 | `A` / `D` | strafe left / right |
 | `←` / `→` | turn (keyboard alternative) |
+| `R` | restart the hunt |
 | `Alt+Tab` | release the mouse without quitting |
 | `Esc` | quit |
 
@@ -76,7 +89,7 @@ several hundred frames per second on a modern CPU.
 
 ## Roadmap
 
-- Sprites (barrels, enemies) with a per-column depth buffer
+- Enemies with simple chase AI (the sprite renderer is ready for them)
 - Sliding doors and secret walls
 - Sound via `waveOut` (still no libraries)
 - Multithreaded column rendering

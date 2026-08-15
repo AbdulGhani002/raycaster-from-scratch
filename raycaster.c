@@ -43,9 +43,35 @@ static long g_mouseDX;                  /* accumulated raw deltas per frame */
 static int g_cursorHidden;
 static int g_captureOn = 1;             /* off in --selftest runs */
 
+/* --- the game: a timed gold hunt ------------------------------------- */
+
+#define NGOLD 10
+#define TRANSP 0x00FF00FFu              /* sprite color key = transparent */
+
+static double zbuf[SCRW];               /* wall depth per column, for sprites */
+static uint32_t spr_gold[TEXSZ * TEXSZ];
+static struct { double x, y; int taken; } gold[NGOLD] = {
+    { 5.5, 12.5, 0 },                   /* corridor, between the first pillars */
+    { 7.5, 4.5, 0 },                    /* control room */
+    { 12.5, 3.5, 0 },                   /* control room, far corner */
+    { 5.5, 19.5, 0 },                   /* storeroom */
+    { 12.5, 16.5, 0 },                  /* storeroom corner */
+    { 17.5, 3.5, 0 },                   /* great hall, north-west */
+    { 21.5, 10.5, 0 },                  /* great hall, east wall */
+    { 19.5, 19.5, 0 },                  /* great hall, south */
+    { 14.5, 13.5, 0 },                  /* corridor alcove behind a pillar */
+    { 1.5, 13.5, 0 },                   /* behind the spawn point */
+};
+static int goldCount, won;
+static double gameTime;                 /* freezes when you win */
+static double g_time;                   /* always runs; drives animation */
+static double g_flash;                  /* pickup screen-flash timer */
+
 static double posX = 2.5, posY = 12.5;  /* player, in map cells */
 static double dirX = 1.0, dirY = 0.0;
-static double planeX = 0.0, planeY = -0.66;   /* FOV ~66 deg */
+static double planeX = 0.0, planeY = 0.66;    /* FOV ~66 deg; +0.66 keeps the
+                                                 view un-mirrored so left is
+                                                 left on screen AND minimap */
 
 /* ---------------------------------------------------------------- utils */
 
@@ -197,6 +223,123 @@ static void gen_textures(void)
             }
         }
     }
+}
+
+/* three stacked gold mounds with a sparkle, on a color-keyed background */
+static void gen_sprites(void)
+{
+    static const struct { int cx, cy, rx, ry; } m[3] = {
+        { 32, 46, 21, 9 }, { 32, 37, 15, 7 }, { 32, 29, 10, 5 }
+    };
+    int x, y, i;
+    for (y = 0; y < TEXSZ; y++) {
+        for (x = 0; x < TEXSZ; x++) {
+            uint32_t c = TRANSP;
+            for (i = 0; i < 3; i++) {
+                float dx = (x - m[i].cx) / (float)m[i].rx;
+                float dy = (y - m[i].cy) / (float)m[i].ry;
+                float d = dx * dx + dy * dy;
+                if (d <= 1.0f) {
+                    if (d > 0.72f)         c = rgb(148, 96, 18);
+                    else if (dy < -0.15f)  c = rgb(248, 214, 88);
+                    else                   c = rgb(214, 164, 40);
+                    c = shade(c, 0.90f + 0.20f * frand2(x + i * 97, y + i * 31));
+                }
+            }
+            if ((x == 46 && y >= 14 && y <= 20) ||
+                (y == 17 && x >= 43 && x <= 49))
+                c = rgb(255, 244, 180);
+            spr_gold[y * TEXSZ + x] = c;
+        }
+    }
+}
+
+/* ------------------------------------------------- 5x7 bitmap font, HUD */
+
+static const uint8_t font5x7[][7] = {
+    {0x0E,0x11,0x11,0x1F,0x11,0x11,0x11}, /* A */
+    {0x1E,0x11,0x11,0x1E,0x11,0x11,0x1E}, /* B */
+    {0x0E,0x11,0x10,0x10,0x10,0x11,0x0E}, /* C */
+    {0x1C,0x12,0x11,0x11,0x11,0x12,0x1C}, /* D */
+    {0x1F,0x10,0x10,0x1E,0x10,0x10,0x1F}, /* E */
+    {0x1F,0x10,0x10,0x1E,0x10,0x10,0x10}, /* F */
+    {0x0E,0x11,0x10,0x17,0x11,0x11,0x0F}, /* G */
+    {0x11,0x11,0x11,0x1F,0x11,0x11,0x11}, /* H */
+    {0x0E,0x04,0x04,0x04,0x04,0x04,0x0E}, /* I */
+    {0x07,0x02,0x02,0x02,0x02,0x12,0x0C}, /* J */
+    {0x11,0x12,0x14,0x18,0x14,0x12,0x11}, /* K */
+    {0x10,0x10,0x10,0x10,0x10,0x10,0x1F}, /* L */
+    {0x11,0x1B,0x15,0x15,0x11,0x11,0x11}, /* M */
+    {0x11,0x11,0x19,0x15,0x13,0x11,0x11}, /* N */
+    {0x0E,0x11,0x11,0x11,0x11,0x11,0x0E}, /* O */
+    {0x1E,0x11,0x11,0x1E,0x10,0x10,0x10}, /* P */
+    {0x0E,0x11,0x11,0x11,0x15,0x12,0x0D}, /* Q */
+    {0x1E,0x11,0x11,0x1E,0x14,0x12,0x11}, /* R */
+    {0x0F,0x10,0x10,0x0E,0x01,0x01,0x1E}, /* S */
+    {0x1F,0x04,0x04,0x04,0x04,0x04,0x04}, /* T */
+    {0x11,0x11,0x11,0x11,0x11,0x11,0x0E}, /* U */
+    {0x11,0x11,0x11,0x11,0x11,0x0A,0x04}, /* V */
+    {0x11,0x11,0x11,0x15,0x15,0x15,0x0A}, /* W */
+    {0x11,0x11,0x0A,0x04,0x0A,0x11,0x11}, /* X */
+    {0x11,0x11,0x0A,0x04,0x04,0x04,0x04}, /* Y */
+    {0x1F,0x01,0x02,0x04,0x08,0x10,0x1F}, /* Z */
+    {0x0E,0x11,0x13,0x15,0x19,0x11,0x0E}, /* 0 */
+    {0x04,0x0C,0x04,0x04,0x04,0x04,0x0E}, /* 1 */
+    {0x0E,0x11,0x01,0x02,0x04,0x08,0x1F}, /* 2 */
+    {0x0E,0x11,0x01,0x06,0x01,0x11,0x0E}, /* 3 */
+    {0x02,0x06,0x0A,0x12,0x1F,0x02,0x02}, /* 4 */
+    {0x1F,0x10,0x1E,0x01,0x01,0x11,0x0E}, /* 5 */
+    {0x06,0x08,0x10,0x1E,0x11,0x11,0x0E}, /* 6 */
+    {0x1F,0x01,0x02,0x04,0x08,0x08,0x08}, /* 7 */
+    {0x0E,0x11,0x11,0x0E,0x11,0x11,0x0E}, /* 8 */
+    {0x0E,0x11,0x11,0x0F,0x01,0x02,0x0C}, /* 9 */
+    {0x00,0x00,0x00,0x00,0x00,0x00,0x00}, /* space */
+    {0x00,0x00,0x00,0x00,0x00,0x0C,0x0C}, /* . */
+    {0x01,0x01,0x02,0x04,0x08,0x10,0x10}, /* / */
+    {0x04,0x04,0x04,0x04,0x04,0x00,0x04}, /* ! */
+};
+
+static int font_idx(char c)
+{
+    if (c >= 'A' && c <= 'Z') return c - 'A';
+    if (c >= '0' && c <= '9') return 26 + (c - '0');
+    switch (c) {
+    case '.': return 37;
+    case '/': return 38;
+    case '!': return 39;
+    }
+    return 36;                          /* space */
+}
+
+static void draw_char(int x, int y, int sc, uint32_t col, char ch)
+{
+    const uint8_t *g = font5x7[font_idx(ch)];
+    int r, b, i, j;
+    for (r = 0; r < 7; r++)
+        for (b = 0; b < 5; b++) {
+            if (!(g[r] & (0x10 >> b))) continue;
+            for (i = 0; i < sc; i++)
+                for (j = 0; j < sc; j++) {
+                    int px = x + b * sc + j, py = y + r * sc + i;
+                    if (px >= 0 && px < SCRW && py >= 0 && py < SCRH)
+                        fb[(size_t)py * SCRW + px] = col;
+                }
+        }
+}
+
+static void draw_text(int x, int y, int sc, uint32_t col, const char *s)
+{
+    const char *p;
+    int cx;
+    for (p = s, cx = x; *p; p++, cx += 6 * sc)
+        draw_char(cx + 2, y + 2, sc, rgb(12, 12, 12), *p);    /* shadow */
+    for (p = s, cx = x; *p; p++, cx += 6 * sc)
+        draw_char(cx, y, sc, col, *p);
+}
+
+static int text_w(int sc, const char *s)
+{
+    return (int)strlen(s) * 6 * sc - sc;
 }
 
 /* -------------------------------------------------------------- the map */
@@ -355,12 +498,85 @@ static void render_frame(void)
             step = (double)TEXSZ / lh;
             texPos = (ds - SCRH / 2.0 + lh / 2.0) * step;
             lit = fogf((float)pwd) * (side == 1 ? 0.72f : 1.0f);
+            zbuf[x] = pwd;              /* sprites test against this */
 
             for (y = ds; y < de; y++) {
                 int ty = (int)texPos & (TEXSZ - 1);
                 texPos += step;
                 fb[(size_t)y * SCRW + x] = shade(T[ty * TEXSZ + texX], lit);
             }
+        }
+    }
+
+    /* gold sprites: billboards, far to near, clipped by the wall z-buffer */
+    {
+        int order[NGOLD];
+        double dist[NGOLD];
+        int n = 0, i, j;
+        for (i = 0; i < NGOLD; i++) {
+            if (gold[i].taken) continue;
+            order[n] = i;
+            dist[n] = (posX - gold[i].x) * (posX - gold[i].x)
+                    + (posY - gold[i].y) * (posY - gold[i].y);
+            n++;
+        }
+        for (i = 1; i < n; i++) {       /* insertion sort, farthest first */
+            int oi = order[i];
+            double di = dist[i];
+            j = i;
+            while (j > 0 && dist[j - 1] < di) {
+                dist[j] = dist[j - 1];
+                order[j] = order[j - 1];
+                j--;
+            }
+            dist[j] = di;
+            order[j] = oi;
+        }
+        for (i = 0; i < n; i++) {
+            int s = order[i];
+            double sx = gold[s].x - posX, sy = gold[s].y - posY;
+            double invDet = 1.0 / (planeX * dirY - dirX * planeY);
+            double tX = invDet * (dirY * sx - dirX * sy);
+            double tY = invDet * (-planeY * sx + planeX * sy);
+            double bob = 10.0 * (0.5 + 0.5 * sin(g_time * 2.5 + s * 1.3));
+            int scrX, vMove, sh, sw, dsx, dsy, x0, x1, y0, y1, px, py;
+            float lit;
+            if (tY <= 0.1) continue;
+            scrX = (int)((SCRW / 2.0) * (1.0 + tX / tY));
+            vMove = (int)((SCRH * 0.22 - bob) / tY);    /* rest near floor */
+            sh = (int)(SCRH / tY / 1.9);
+            if (sh <= 0) continue;
+            sw = sh;
+            dsy = SCRH / 2 - sh / 2 + vMove;
+            dsx = scrX - sw / 2;
+            x0 = dsx < 0 ? 0 : dsx;
+            x1 = dsx + sw > SCRW ? SCRW : dsx + sw;
+            y0 = dsy < 0 ? 0 : dsy;
+            y1 = dsy + sh > SCRH ? SCRH : dsy + sh;
+            lit = fogf((float)tY);
+            for (px = x0; px < x1; px++) {
+                int texX = (px - dsx) * TEXSZ / sw;
+                if (tY >= zbuf[px]) continue;
+                for (py = y0; py < y1; py++) {
+                    int texY = (py - dsy) * TEXSZ / sh;
+                    uint32_t c = spr_gold[texY * TEXSZ + texX];
+                    if (c != TRANSP)
+                        fb[(size_t)py * SCRW + px] = shade(c, lit);
+                }
+            }
+        }
+    }
+
+    /* pickup flash: brief golden wash over the frame */
+    if (g_flash > 0) {
+        float a = (float)(g_flash / 0.18) * 0.30f;
+        size_t k;
+        for (k = 0; k < (size_t)SCRW * SCRH; k++) {
+            uint32_t c = fb[k];
+            int r = (c >> 16) & 255, g = (c >> 8) & 255, b = c & 255;
+            fb[k] = rgb(r + (int)((255 - r) * a),
+                        g + (int)((208 - g) * a),
+                        b + (int)((80 - b) * a));
         }
     }
 
@@ -397,6 +613,29 @@ static void render_frame(void)
                 fb[(size_t)(OY + (int)(posY * S) + y) * SCRW
                    + OX + (int)(posX * S) + x] = rgb(255, 255, 255);
     }
+
+    /* HUD */
+    {
+        char buf[64];
+        snprintf(buf, sizeof buf, "GOLD %d/%d", goldCount, NGOLD);
+        draw_text(SCRW - text_w(3, buf) - 14, 12, 3, rgb(244, 204, 72), buf);
+        snprintf(buf, sizeof buf, "TIME %.1f", gameTime);
+        draw_text(SCRW - text_w(3, buf) - 14, 44, 3, rgb(228, 228, 228), buf);
+        if (won) {
+            const char *s1 = "ALL GOLD FOUND!";
+            const char *s2 = "PRESS R TO PLAY AGAIN";
+            snprintf(buf, sizeof buf, "TIME %.1f SECONDS", gameTime);
+            draw_text((SCRW - text_w(5, s1)) / 2, SCRH / 2 - 96, 5,
+                      rgb(250, 210, 80), s1);
+            draw_text((SCRW - text_w(4, buf)) / 2, SCRH / 2 - 34, 4,
+                      rgb(235, 235, 235), buf);
+            draw_text((SCRW - text_w(3, s2)) / 2, SCRH / 2 + 22, 3,
+                      rgb(185, 185, 185), s2);
+        } else if (g_time < 6.0) {
+            const char *s0 = "FIND ALL THE GOLD!";
+            draw_text((SCRW - text_w(4, s0)) / 2, 60, 4, rgb(250, 210, 80), s0);
+        }
+    }
 }
 
 /* ------------------------------------------------------ player movement */
@@ -418,10 +657,29 @@ static void rotate(double a)
     planeY = opx * s + planeY * c;
 }
 
+static void restart_game(void)
+{
+    int i;
+    for (i = 0; i < NGOLD; i++) gold[i].taken = 0;
+    goldCount = 0;
+    won = 0;
+    gameTime = 0;
+    g_flash = 0;
+    posX = 2.5; posY = 12.5;
+    dirX = 1.0; dirY = 0.0;
+    planeX = 0.0; planeY = 0.66;
+}
+
 static void update(double dt)
 {
     double ms = 3.8 * dt, rs = 2.6 * dt;
     double mvx = 0, mvy = 0;
+    int i;
+
+    g_time += dt;
+    if (!won) gameTime += dt;
+    if (g_flash > 0) g_flash -= dt;
+    if (g_keys['R']) restart_game();
     if (g_keys['W']) { mvx += dirX * ms;  mvy += dirY * ms; }
     if (g_keys['S']) { mvx -= dirX * ms;  mvy -= dirY * ms; }
     if (g_keys['A']) { mvx += dirY * ms;  mvy -= dirX * ms; }   /* strafe left */
@@ -435,6 +693,19 @@ static void update(double dt)
 
     if (!blocked(posX + mvx, posY)) posX += mvx;   /* per-axis: wall sliding */
     if (!blocked(posX, posY + mvy)) posY += mvy;
+
+    for (i = 0; i < NGOLD; i++) {       /* walk over gold to collect it */
+        double dx, dy;
+        if (gold[i].taken) continue;
+        dx = posX - gold[i].x;
+        dy = posY - gold[i].y;
+        if (dx * dx + dy * dy < 0.45 * 0.45) {
+            gold[i].taken = 1;
+            goldCount++;
+            g_flash = 0.18;
+            if (goldCount == NGOLD) won = 1;
+        }
+    }
 }
 
 /* ------------------------------------------------- BMP screenshot writer */
@@ -557,6 +828,7 @@ int main(int argc, char **argv)
     }
 
     gen_textures();
+    gen_sprites();
     gen_map();
     g_captureOn = !selftest;            /* don't grab the mouse in test runs */
 
@@ -587,7 +859,7 @@ int main(int argc, char **argv)
         RegisterClassA(&wc);
 
         AdjustWindowRect(&r, style, FALSE);
-        hw = CreateWindowExA(0, "raycasterwnd", "Raycaster (pure C)",
+        hw = CreateWindowExA(0, "raycasterwnd", "Gold Hunter (pure C)",
                              style | WS_VISIBLE, CW_USEDEFAULT, CW_USEDEFAULT,
                              r.right - r.left, r.bottom - r.top,
                              NULL, NULL, wc.hInstance, NULL);
@@ -608,9 +880,10 @@ int main(int argc, char **argv)
         bmi.bmiHeader.biBitCount = 32;
         bmi.bmiHeader.biCompression = BI_RGB;
 
-        printf("Raycaster (pure C, no libraries)\n");
+        printf("Gold Hunter (pure C raycaster, no libraries)\n");
+        printf("  Find all %d gold stashes as fast as you can!\n", NGOLD);
         printf("  W/S move   A/D strafe   Mouse or Left/Right arrows turn\n");
-        printf("  Esc quit   Alt+Tab releases the mouse\n");
+        printf("  R restart   Esc quit   Alt+Tab releases the mouse\n");
 
         t0 = tprev = now_seconds();
         for (;;) {
@@ -640,7 +913,7 @@ int main(int argc, char **argv)
             if (t - fpsT >= 0.5) {
                 if (fpsT > 0) {
                     char title[64];
-                    snprintf(title, sizeof title, "Raycaster (pure C) — %d fps",
+                    snprintf(title, sizeof title, "Gold Hunter (pure C) — %d fps",
                              (int)(fpsFrames / (t - fpsT)));
                     SetWindowTextA(hw, title);
                     if (selftest)
