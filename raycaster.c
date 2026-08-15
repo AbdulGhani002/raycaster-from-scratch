@@ -33,10 +33,15 @@
 #define TEXSZ 64            /* textures are 64x64, power of two */
 #define TEXN 7              /* 0 floor, 1..5 walls, 6 ceiling */
 
+#define MOUSE_SENS 0.0018               /* radians per raw mouse count */
+
 static uint32_t fb[SCRW * SCRH];        /* 0x00RRGGBB, top-down rows */
 static uint32_t tex[TEXN][TEXSZ * TEXSZ];
 static int world[MAPH][MAPW];           /* [y][x], 0 = empty */
 static int g_keys[256];
+static long g_mouseDX;                  /* accumulated raw deltas per frame */
+static int g_cursorHidden;
+static int g_captureOn = 1;             /* off in --selftest runs */
 
 static double posX = 2.5, posY = 12.5;  /* player, in map cells */
 static double dirX = 1.0, dirY = 0.0;
@@ -423,6 +428,10 @@ static void update(double dt)
     if (g_keys['D']) { mvx -= dirY * ms;  mvy += dirX * ms; }   /* strafe right */
     if (g_keys[VK_LEFT])  rotate(-rs);
     if (g_keys[VK_RIGHT]) rotate(rs);
+    if (g_mouseDX) {                    /* raw counts, already frame-rate free */
+        rotate(g_mouseDX * MOUSE_SENS);
+        g_mouseDX = 0;
+    }
 
     if (!blocked(posX + mvx, posY)) posX += mvx;   /* per-axis: wall sliding */
     if (!blocked(posX, posY + mvy)) posY += mvy;
@@ -458,6 +467,28 @@ static int save_bmp(const char *path, const uint32_t *px, int w, int h)
 
 /* -------------------------------------------------------------- windowing */
 
+static void capture_mouse(HWND hw)      /* FPS-style: hide + lock to window */
+{
+    RECT rc;
+    POINT p0 = { 0, 0 }, p1;
+    if (!g_captureOn) return;
+    GetClientRect(hw, &rc);
+    p1.x = rc.right;
+    p1.y = rc.bottom;
+    ClientToScreen(hw, &p0);
+    ClientToScreen(hw, &p1);
+    rc.left = p0.x; rc.top = p0.y;
+    rc.right = p1.x; rc.bottom = p1.y;
+    ClipCursor(&rc);
+    if (!g_cursorHidden) { ShowCursor(FALSE); g_cursorHidden = 1; }
+}
+
+static void release_mouse(void)
+{
+    ClipCursor(NULL);
+    if (g_cursorHidden) { ShowCursor(TRUE); g_cursorHidden = 0; }
+}
+
 static LRESULT CALLBACK wndproc(HWND hw, UINT msg, WPARAM wp, LPARAM lp)
 {
     switch (msg) {
@@ -468,7 +499,21 @@ static LRESULT CALLBACK wndproc(HWND hw, UINT msg, WPARAM wp, LPARAM lp)
     case WM_KEYUP:
         g_keys[wp & 0xff] = 0;
         return 0;
+    case WM_INPUT: {
+        RAWINPUT ri;
+        UINT sz = sizeof ri;
+        if (GetRawInputData((HRAWINPUT)lp, RID_INPUT, &ri, &sz,
+                            sizeof(RAWINPUTHEADER)) != (UINT)-1
+            && ri.header.dwType == RIM_TYPEMOUSE
+            && !(ri.data.mouse.usFlags & MOUSE_MOVE_ABSOLUTE))
+            g_mouseDX += ri.data.mouse.lLastX;
+        break;                          /* DefWindowProc does the cleanup */
+    }
+    case WM_SETFOCUS:
+        capture_mouse(hw);
+        return 0;
     case WM_KILLFOCUS:
+        release_mouse();
         memset(g_keys, 0, sizeof g_keys);
         return 0;
     case WM_PAINT: {
@@ -478,6 +523,7 @@ static LRESULT CALLBACK wndproc(HWND hw, UINT msg, WPARAM wp, LPARAM lp)
         return 0;
     }
     case WM_DESTROY:
+        release_mouse();
         PostQuitMessage(0);
         return 0;
     }
@@ -512,6 +558,7 @@ int main(int argc, char **argv)
 
     gen_textures();
     gen_map();
+    g_captureOn = !selftest;            /* don't grab the mouse in test runs */
 
     if (screenshot) {
         render_frame();
@@ -549,6 +596,11 @@ int main(int argc, char **argv)
             return 1;
         }
 
+        {                               /* raw mouse input for smooth turning */
+            RAWINPUTDEVICE rid = { 1, 2, 0, hw };   /* generic desktop, mouse */
+            RegisterRawInputDevices(&rid, 1, sizeof rid);
+        }
+
         bmi.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
         bmi.bmiHeader.biWidth = SCRW;
         bmi.bmiHeader.biHeight = -SCRH;         /* negative: top-down rows */
@@ -557,7 +609,8 @@ int main(int argc, char **argv)
         bmi.bmiHeader.biCompression = BI_RGB;
 
         printf("Raycaster (pure C, no libraries)\n");
-        printf("  W/S move   A/D strafe   Left/Right arrows turn   Esc quit\n");
+        printf("  W/S move   A/D strafe   Mouse or Left/Right arrows turn\n");
+        printf("  Esc quit   Alt+Tab releases the mouse\n");
 
         t0 = tprev = now_seconds();
         for (;;) {

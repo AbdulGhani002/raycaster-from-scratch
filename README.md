@@ -19,6 +19,7 @@ every frame, on the CPU.
 | Procedural textures — brick, stone, wood, metal, moss (no image files) | `gen_textures()` |
 | The world map, built from wall primitives | `gen_map()` |
 | Collision detection with wall sliding | `blocked()`, `update()` |
+| Raw-input mouse look with cursor capture | `wndproc()`, `capture_mouse()` |
 | Minimap overlay with alpha blending | `render_frame()` |
 | High-resolution frame timing | `now_seconds()` |
 | BMP screenshot encoder, byte by byte | `save_bmp()` |
@@ -27,9 +28,11 @@ every frame, on the CPU.
 
 | Key | Action |
 |---|---|
+| Mouse | turn (raw input, FPS-style capture) |
 | `W` / `S` | move forward / back |
 | `A` / `D` | strafe left / right |
-| `←` / `→` | turn |
+| `←` / `→` | turn (keyboard alternative) |
+| `Alt+Tab` | release the mouse without quitting |
 | `Esc` | quit |
 
 ## Build
@@ -75,6 +78,5 @@ several hundred frames per second on a modern CPU.
 
 - Sprites (barrels, enemies) with a per-column depth buffer
 - Sliding doors and secret walls
-- Mouse look
 - Sound via `waveOut` (still no libraries)
 - Multithreaded column rendering
